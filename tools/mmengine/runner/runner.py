@@ -50,7 +50,7 @@ from .log_processor import LogProcessor
 from .loops import EpochBasedTrainLoop, IterBasedTrainLoop, TestLoop, ValLoop
 from .priority import Priority, get_priority
 from .utils import _get_batch_size, set_random_seed
-from infobatch import *
+
 ConfigType = Union[Dict, Config, ConfigDict]
 ParamSchedulerType = Union[List[_ParamScheduler], Dict[str,
                                                        List[_ParamScheduler]]]
@@ -302,7 +302,6 @@ class Runner:
         else:
             self.cfg = Config(dict())
 
-        train_dataloader = 
         # lazy initialization
         training_related = [train_dataloader, train_cfg, optim_wrapper]
         if not (all(item is None for item in training_related)
