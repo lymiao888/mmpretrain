@@ -7,6 +7,7 @@ import pickle
 import platform
 import time
 import warnings
+import random
 from collections import OrderedDict
 from functools import partial
 from typing import Callable, Dict, List, Optional, Sequence, Union
@@ -50,6 +51,8 @@ from .log_processor import LogProcessor
 from .loops import EpochBasedTrainLoop, IterBasedTrainLoop, TestLoop, ValLoop
 from .priority import Priority, get_priority
 from .utils import _get_batch_size, set_random_seed
+
+from .infobatch import *
 
 ConfigType = Union[Dict, Config, ConfigDict]
 ParamSchedulerType = Union[List[_ParamScheduler], Dict[str,
@@ -287,6 +290,8 @@ class Runner:
         default_scope: str = 'mmengine',
         randomness: Dict = dict(seed=None),
         experiment_name: Optional[str] = None,
+        ratio: Optional[float] = None,
+        delta: Optional[float] = None,
         cfg: Optional[ConfigType] = None,
     ):
         self._work_dir = osp.abspath(work_dir)
@@ -312,6 +317,12 @@ class Runner:
                 f'train_dataloader={train_dataloader}, '
                 f'train_cfg={train_cfg}, '
                 f'optim_wrapper={optim_wrapper}.')
+        # datasets = [train_dataloader.dataset]
+        # datasets[0] = MyTrainSet(datasets[0],total_steps=train_cfg.max_epochs,ratio=ratio)
+        # train_dataloader.dataset = datasets
+        # datasets = datasets if isinstance(datasets, (list, tuple)) else [datasets]
+        dataset=MyTrainSet(train_dataloader.dataset,total_steps=train_cfg.max_epochs,ratio=ratio)
+        train_dataloader.dataset=dataset
         self._train_dataloader = train_dataloader
         self._train_loop = train_cfg
 
@@ -486,6 +497,8 @@ class Runner:
             default_scope=cfg.get('default_scope', 'mmengine'),
             randomness=cfg.get('randomness', dict(seed=None)),
             experiment_name=cfg.get('experiment_name'),
+            ratio=cfg.get('ratio'),
+            delta=cfg.get('delta'),
             cfg=cfg,
         )
 
@@ -1324,10 +1337,29 @@ class Runner:
                 'evaluator should be one of dict, list of dict, and Evaluator'
                 f', but got {evaluator}')
 
+    # @staticmethod
+    def worker_init_fn(worker_id, num_workers, rank, seed):
+        """Worker init func for dataloader.
+
+        The seed of each worker equals to num_worker * rank + worker_id + user_seed
+
+        Args:
+            worker_id (int): Worker id.
+            num_workers (int): Number of workers.
+            rank (int): The rank of current process.
+            seed (int): The random seed to use.
+        """
+
+        worker_seed = num_workers * rank + worker_id + seed
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+        torch.manual_seed(worker_seed)
+
     @staticmethod
     def build_dataloader(dataloader: Union[DataLoader, Dict],
                          seed: Optional[int] = None,
-                         diff_rank_seed: bool = False) -> DataLoader:
+                         diff_rank_seed: bool = False,
+                         **kwargs) -> DataLoader:
         """Build dataloader.
 
         The method builds three components:
@@ -1359,14 +1391,17 @@ class Runner:
         Returns:
             Dataloader: DataLoader build from ``dataloader_cfg``.
         """
-        if isinstance(dataloader, DataLoader):
+        if isinstance(dataloader, DataLoader) and not isinstance(dataset, MyTrainSet):
             return dataloader
 
         dataloader_cfg = copy.deepcopy(dataloader)
-
+        shuffle = True
         # build dataset
         dataset_cfg = dataloader_cfg.pop('dataset')
-        if isinstance(dataset_cfg, dict):
+        if isinstance(dataset_cfg, MyTrainSet):
+            dataset = dataset_cfg
+            shuffle = False
+        elif isinstance(dataset_cfg, dict):
             dataset = DATASETS.build(dataset_cfg)
             if hasattr(dataset, 'full_init'):
                 dataset.full_init()
@@ -1384,16 +1419,21 @@ class Runner:
             dataset = _SlicedDataset(dataset, num_samples)
 
         # build sampler
-        sampler_cfg = dataloader_cfg.pop('sampler')
-        if isinstance(sampler_cfg, dict):
-            sampler_seed = None if diff_rank_seed else seed
-            sampler = DATA_SAMPLERS.build(
-                sampler_cfg,
-                default_args=dict(dataset=dataset, seed=sampler_seed))
+        if isinstance(dataset_cfg, MyTrainSet):
+            rank, world_size = get_dist_info()
+            sampler_cfg = dataloader_cfg.pop('sampler')
+            sampler = DistributedSamplerWrapper(dataset_cfg.pruning_sampler(),world_size,rank,shuffle=False)
         else:
-            # fallback to raise error in dataloader
-            # if `sampler_cfg` is not a valid type
-            sampler = sampler_cfg
+            sampler_cfg = dataloader_cfg.pop('sampler')
+            if isinstance(sampler_cfg, dict):
+                sampler_seed = None if diff_rank_seed else seed
+                sampler = DATA_SAMPLERS.build(
+                    sampler_cfg,
+                    default_args=dict(dataset=dataset, seed=sampler_seed))
+            else:
+                # fallback to raise error in dataloader
+                # if `sampler_cfg` is not a valid type
+                sampler = sampler_cfg
 
         # build batch sampler
         batch_sampler_cfg = dataloader_cfg.pop('batch_sampler', None)
@@ -1426,7 +1466,7 @@ class Runner:
                     f'object, but got {type(worker_init_fn_type)}')
             assert callable(worker_init_fn)
             init_fn = partial(worker_init_fn,
-                              **worker_init_fn_cfg)  # type: ignore
+                            **worker_init_fn_cfg)  # type: ignore
         else:
             if seed is not None:
                 disable_subprocess_warning = dataloader_cfg.pop(
@@ -1473,14 +1513,60 @@ class Runner:
             raise TypeError(
                 'collate_fn should be a dict or callable object, but got '
                 f'{collate_fn_cfg}')
-        data_loader = DataLoader(
-            dataset=dataset,
-            sampler=sampler if batch_sampler is None else None,
-            batch_sampler=batch_sampler,
-            collate_fn=collate_fn,
-            worker_init_fn=init_fn,
-            **dataloader_cfg)
+        if isinstance(dataset_cfg, MyTrainSet):
+            data_loader = DataLoader(
+                dataset=dataset,
+                sampler=sampler if batch_sampler is None else None,
+                batch_sampler=batch_sampler,
+                collate_fn=collate_fn,
+                shuffle=shuffle,
+                worker_init_fn=init_fn,
+                **dataloader_cfg)
+        else:
+            data_loader = DataLoader(
+                dataset=dataset,
+                sampler=sampler if batch_sampler is None else None,
+                batch_sampler=batch_sampler,
+                collate_fn=collate_fn,
+                worker_init_fn=init_fn,
+                **dataloader_cfg)
         return data_loader
+
+    # def build_infobatch_dataloader(self,
+    #                     dataset,
+    #                     dataloader: Union[DataLoader, Dict],
+    #                     batch_size,
+    #                     shuffle=True,
+    #                     drop_last=False,
+    #                     seed=None,
+    #                     pin_memory=True,
+    #                     persistent_workers=True,
+    #                     **kwargs) -> DataLoader:
+    #     if isinstance(dataloader, DataLoader):
+    #         return dataloader
+        
+    #     rank, world_size = get_dist_info()
+    #     dataloader_cfg = copy.deepcopy(dataloader)
+    #     if isinstance(dataset, MyTrainSet):
+    #         sampler = DistributedSamplerWrapper(dataset.pruning_sampler(),world_size,rank,shuffle=False)
+    #         shuffle = False
+    #     else:
+    #         sampler =  None
+    #     from mmcv.parallel import collate
+    #     # init_fn = partial(
+    #     #     worker_init_fn, num_workers=num_workers, rank=rank,
+    #     #     seed=seed) if seed is not None else None
+    #     data_loader = DataLoader(
+    #         dataset=dataset,
+    #         batch_size=batch_size,
+    #         sampler=sampler,
+    #         batch_sampler=None,
+    #         collate_fn=partial(collate, samples_per_gpu=batch_size),
+    #         worker_init_fn=None,
+    #         **kwargs)
+    #     return data_loader
+
+        
 
     def build_train_loop(self, loop: Union[BaseLoop, Dict]) -> BaseLoop:
         """Build training loop.

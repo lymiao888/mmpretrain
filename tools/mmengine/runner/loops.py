@@ -13,7 +13,7 @@ from mmengine.registry import LOOPS
 from .amp import autocast
 from .base_loop import BaseLoop
 from .utils import calc_dynamic_intervals
-
+from .infobatch import *
 
 @LOOPS.register_module()
 class EpochBasedTrainLoop(BaseLoop):

@@ -43,3 +43,6 @@ val_evaluator = dict(type='Accuracy', topk=(1, ))
 
 test_dataloader = val_dataloader
 test_evaluator = val_evaluator
+
+ratio=0.5
+delta=0.75

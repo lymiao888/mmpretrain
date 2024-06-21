@@ -67,9 +67,9 @@ class RuntimeInfoHook(Hook):
         runner.message_hub.update_info('iter', runner.iter)
         runner.message_hub.update_info('max_epochs', runner.max_epochs)
         runner.message_hub.update_info('max_iters', runner.max_iters)
-        if hasattr(runner.train_dataloader.dataset, 'metainfo'):
+        if hasattr(runner.train_dataloader[0].dataset, 'metainfo'):
             runner.message_hub.update_info(
-                'dataset_meta', runner.train_dataloader.dataset.metainfo)
+                'dataset_meta', runner.train_dataloader[0].dataset.metainfo)
 
     def after_train(self, runner) -> None:
         runner.message_hub.pop_info('loop_stage')

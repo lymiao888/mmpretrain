@@ -9,7 +9,7 @@ from mmengine.registry import RUNNERS
 from mmengine.runner import Runner
 from mmengine.utils import digit_version
 from mmengine.utils.dl_utils import TORCH_VERSION
-
+from mmengine.runner.infobatch import *
 
 def parse_args():
     parser = argparse.ArgumentParser(description='Train a model')
@@ -64,6 +64,10 @@ def parse_args():
     # will pass the `--local-rank` parameter to `tools/train.py` instead
     # of `--local_rank`.
     parser.add_argument('--local_rank', '--local-rank', type=int, default=0)
+    # infobatch args
+    parser.add_argument('--ratio',default=[0.25,0.5],nargs='+', type=float)
+    parser.add_argument('--delta',default=0.875,type=float)
+    # parser.add_argument('--quantile',default=[20,85],nargs='+', type=int)
     args = parser.parse_args()
     if 'LOCAL_RANK' not in os.environ:
         os.environ['LOCAL_RANK'] = str(args.local_rank)
@@ -79,6 +83,8 @@ def merge_args(cfg, args):
         cfg.val_evaluator = None
 
     cfg.launcher = args.launcher
+    cfg.ratio = args.ratio
+    cfg.delta = args.delta
 
     # work_dir is determined in this priority: CLI > segment in file > filename
     if args.work_dir is not None:
